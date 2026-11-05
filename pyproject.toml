@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gopro-max-tools"
+version = "0.1.0"
+description = "Tools for GoPro Max .360 files: frames, metadata, orientation, a levelled panorama and a camera model"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+dependencies = ["numpy", "av", "opencv-python-headless"]
+
+[project.optional-dependencies]
+panorama = ["torch"]
+
+[tool.setuptools]
+packages = ["max360"]

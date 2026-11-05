@@ -1,0 +1,34 @@
+--- a/GPMF_parser.c
++++ b/GPMF_parser.c
+@@ -2004,8 +2004,6 @@
+ 						uint32_t zeros = cb[currWord].offset;
+ 						int delta = (int)cb[currWord].value * quant;
+ 
+-						last += delta * cb[currWord].bytes_stored;
+-
+ 						if (channels * (pos + zeros) * sizeoftype > localbuf_size) 
+ 							return GPMF_ERROR_MEMORY;
+ 
+@@ -2014,18 +2012,22 @@
+ 						default:
+ 						case -2:
+ 							while (zeros) { buf_s16[channels*pos++ + chn] = (int16_t) BYTESWAP16(last); zeros--; }
++							last += delta * cb[currWord].bytes_stored;
+ 							buf_s16[channels*pos + chn] = (int16_t) BYTESWAP16(last);
+ 							break;
+ 						case -1:
+ 							while (zeros) { buf_s8[channels*pos++ + chn] = (int8_t)last; zeros--; }
++							last += delta * cb[currWord].bytes_stored;
+ 							buf_s8[channels*pos + chn] = (int8_t)last;
+ 							break;
+ 						case 1:
+ 							while (zeros) { buf_u8[channels*pos++ + chn] = (uint8_t)last; zeros--; }
++							last += delta * cb[currWord].bytes_stored;
+ 							buf_u8[channels*pos + chn] = (uint8_t)last;
+ 							break;
+ 						case 2:
+ 							while (zeros) { buf_u16[channels*pos++ + chn] = BYTESWAP16(last); zeros--; }
++							last += delta * cb[currWord].bytes_stored;
+ 							buf_u16[channels*pos + chn] = BYTESWAP16(last);
+ 							break;
+ 						}
