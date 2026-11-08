@@ -4,7 +4,7 @@ Tools for GoPro Max `.360` files: decoded frames, metadata including `DISP`, gra
 
 The file format is mostly undocumented, so [docs/FORMAT.md](docs/FORMAT.md) writes down what's been worked out. Not affiliated with GoPro.
 
-**Status:** tested on files from one camera (firmware `H19.03.02.00.00`). The C++ camera model is the clean equi-angular cube plus the depth-driven warp, using no fitted shape; the baseline in `calibration/model4.txt` is that camera's. The Python package doesn't include the camera model yet. See [Limits](docs/FORMAT.md#limits).
+**Status:** tested on files from one camera (firmware `H19.03.02.00.00`). The C++ camera model is the clean equi-angular cube plus the depth-driven warp, using no fitted shape; it takes the camera's baseline from the `.360` file's header, and `calibration/model4.txt` holds corrections, all zero as shipped. The Python package doesn't include the camera model yet. See [Limits](docs/FORMAT.md#limits).
 
 ## Python
 
@@ -43,8 +43,8 @@ The panorama shows the picture as the camera stitched it, which suits detection.
 #include "maxcam.h"
 using namespace maxcam;
 
-CameraModel model;
-if (!model.load("calibration/model4.txt"))
+CameraModel model;                                        // the cube, with a built-in baseline
+if (!model.load("clip.360", "calibration/model4.txt"))    // the clip's own baseline; optional corrections
     return 1;
 
 // disp: this frame's 640 DISP values as floats, from max360.read_disp

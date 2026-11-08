@@ -1,4 +1,5 @@
-// The camera model and warp: self-consistency, and agreement with docs/FORMAT.md.  No footage needed.
+// The camera model and warp: self-consistency, and agreement with docs/FORMAT.md.  No footage needed;
+// a .360 file as the second argument also checks reading the baseline from its header.
 //   make -C cpp test
 #include <cmath>
 #include <cstdio>
@@ -30,12 +31,33 @@ static Vec3 format_ray(double x, double y) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::fprintf(stderr, "usage: %s model4.txt\n", argv[0]); return 2; }
+    const char* corrections = argc > 1 ? argv[1] : "../calibration/model4.txt";
     CameraModel m;
-    check("loads", m.load(argv[1]), 0);
-    check("a missing file is an error", !CameraModel().load("/nonexistent"), 0);
+    check("loads the corrections file", m.load("", corrections), 0);
+    check("a missing corrections file is an error", !CameraModel().load("", "/nonexistent"), 0);
+    check("a missing clip is an error", !CameraModel().load("/nonexistent.360", ""), 0);
+    check("the shipped file has no lattice corrections", !m.has_lattice(), 0);
     Vec3 b = m.baseline();
-    check("baseline about (-2.34, 0, 3.58) cm", std::fabs(b.x + 2.34) < 0.01 && std::fabs(b.y) < 0.01 && std::fabs(b.z - 3.58) < 0.01, b.norm());
+    check("default baseline (-2.336, 0, 3.58) cm", std::fabs(b.x + 2.336) < 1e-9 && b.y == 0 && std::fabs(b.z - 3.58) < 1e-9, b.norm());
+    {   // the default-constructed model is the same as the shipped file
+        CameraModel d;
+        double worst = 0;
+        std::srand(7);
+        for (int i = 0; i < 5000; i++) {
+            Vec2 px(frand(4095), frand(2687));
+            worst = std::max(worst, (d.pixel_to_ray(px) - m.pixel_to_ray(px)).norm());
+        }
+        check("the default model equals the shipped file", worst == 0, worst);
+    }
+    if (argc > 2) {
+        CameraModel c;
+        bool ok = c.load(argv[2], corrections);
+        check("reads the baseline from a .360 header", ok, 0);
+        if (!ok) std::printf("  %s\n", c.error().c_str());
+        Vec3 cb = c.baseline();
+        check("that baseline is a few cm, mostly along z", cb.norm() > 2 && cb.norm() < 8 && std::fabs(cb.z) > std::fabs(cb.x), cb.norm());
+        std::printf("  header baseline (%.4f, %.4f, %.4f) cm\n", cb.x, cb.y, cb.z);
+    }
 
     check("zone of a C0 pixel", zone_index(Vec2(2048, 672)) == 2, zone_index(Vec2(2048, 672)));
     check("C0 is lens 0", lens_index(Vec2(2048, 672)) == 0, 0);
@@ -53,7 +75,7 @@ int main(int argc, char** argv) {
         Vec2 px(frand(4095), frand(2687));
         worst = std::max(worst, (m.pixel_to_ray(px).normalized() - format_ray(px.x, px.y)).norm());
     }
-    check("the supplied model is FORMAT.md's ray table", worst < 1e-8, worst);     // the file holds 8 decimals
+    check("with no corrections the model is FORMAT.md's ray table", worst < 1e-12, worst);
     Vec3 mid = m.pixel_to_ray(Vec2(2720 + 656 - 0.5, 671.5)).normalized();
     check("R0's mid-plane, mid-height is (1, 0, 0)", (mid - Vec3(1, 0, 0)).norm() < 1e-8, (mid - Vec3(1, 0, 0)).norm());
 
@@ -103,6 +125,38 @@ int main(int argc, char** argv) {
     Vec2 edge(3407, 671.5), w = StitchWarp::recorded_to_model(edge, near_, rho);
     check("closest objects move about 57 px across, at mid-face", std::fabs(std::fabs(w.x - edge.x) - 57) < 2, std::fabs(w.x - edge.x));
     check("that pixel goes past the edge, on the same lens", w.x > 3407.5 && lens_index(edge) == 0, w.x);
+
+    {   // Corrections.  A tiny lattice value switches to the spline path, which must still give the cube.
+        FILE* f = std::fopen("test_corrections.txt", "w");
+        for (int i = 0; i < 902; i++) std::fprintf(f, "%s\n", i == 500 ? "1e-13 0 0" : "0 0 0");
+        std::fprintf(f, "0.1 0 -0.2\n0 0.5 0\n");      // baseline +(0.1, 0, -0.2) cm; lens 1 rotated 0.5 deg about y
+        std::fclose(f);
+        CameraModel c;
+        check("loads a corrections file", c.load("", "test_corrections.txt"), 0);
+        check("it has lattice corrections", c.has_lattice(), 0);
+        Vec3 cb = c.baseline();
+        check("baseline correction applied", std::fabs(cb.x + 2.236) < 1e-9 && std::fabs(cb.z - 3.38) < 1e-9, cb.norm());
+        double worst = 0, worst1 = 0, worstb = 0;
+        std::srand(3);
+        for (int i = 0; i < 20000; i++) {
+            Vec2 px(frand(4095), frand(2687));
+            int lens = lens_index(px);
+            Vec3 r = c.pixel_to_ray(px).normalized(), r0 = m.pixel_to_ray(px).normalized();
+            if (lens == 0) worst = std::max(worst, (r - r0).norm());
+            else {      // r0 rotated by 0.5 deg about +y, right-handed
+                double th = 0.5 * PI_ / 180, cs = std::cos(th), sn = std::sin(th);
+                Vec3 e(r0.x * cs + r0.z * sn, r0.y, -r0.x * sn + r0.z * cs);
+                worst1 = std::max(worst1, (r - e).norm());
+            }
+            worstb = std::max(worstb, std::sqrt((c.ray_to_pixel(r, lens) - px).norm2()));
+        }
+        check("spline path with ~zero corrections is still the cube (lens 0)", worst < 1e-9, worst);
+        check("lens 1 rays are rotated by 0.5 deg about +y", worst1 < 1e-12, worst1);
+        check("pixel -> ray -> pixel with corrections within 0.001 px", worstb < 1e-3, worstb);
+        Vec3 c1 = c.pixel_to_ray(Vec2(2047.5, 2015.5)).normalized();
+        check("rotation about +y tilts C1's axis towards -x", c1.x < -0.008 && c1.x > -0.009, c1.x);
+        std::remove("test_corrections.txt");
+    }
 
     // recorded -> ray -> recorded.  A few recorded pixels right at a stitch corner do not come back.
     int n = 0, bad = 0;

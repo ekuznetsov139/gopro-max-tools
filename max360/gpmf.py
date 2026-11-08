@@ -1,4 +1,4 @@
-"""GoPro metadata (GPMF) from a .360 file: scaled sensor tracks, and DISP.
+"""GoPro metadata (GPMF) from a .360 file: scaled sensor tracks, DISP, and the factory calibration.
 
 Pure Python over PyAV, so no C parser has to be built.
 
@@ -69,6 +69,67 @@ def read_tracks(path, wanted=('CORI', 'GRAV')):
     if missing:
         raise ValueError(f"{path}: no {missing} in the metadata track")
     return {w: np.concatenate(v) for w, v in out.items()}
+
+
+# ---- Factory calibration, in moov/udta/GPMF -----------------------------------
+def _box(f, start, end, want):
+    """Payload range of the first box named `want` among the children in [start, end)."""
+    off = start
+    while off + 8 <= end:
+        f.seek(off); hdr = f.read(8)
+        if len(hdr) < 8:
+            break
+        size, typ = struct.unpack('>I4s', hdr); hs = 8
+        if size == 1:
+            size = struct.unpack('>Q', f.read(8))[0]; hs = 16
+        elif size == 0:
+            size = end - off
+        if typ == want:
+            return off + hs, off + size
+        off += size
+    return None
+
+
+def read_calibration(path):
+    """The factory calibration of docs/FORMAT.md, from moov/udta/GPMF: {block: {field: value}} with the
+    blocks keyed by their DVID fourcc ('GEOC', 'FRNT', 'BACK', ...) or, failing that, by their DVNM name.
+    Scalars come back as floats or ints, strings as str, longer arrays as lists."""
+    with open(path, 'rb') as f:
+        f.seek(0, 2); end = f.tell(); r = (0, end)
+        for name in (b'moov', b'udta', b'GPMF'):
+            r = _box(f, r[0], r[1], name)
+            if r is None:
+                raise ValueError(f"{path}: no {name.decode()} box; is this a .360 file?")
+        f.seek(r[0]); buf = f.read(r[1] - r[0])
+    out = {}
+    for k, typ, size, rep, off in _klv(buf):
+        if k != 'DEVC' or typ is not None:
+            continue
+        block, key = {}, None
+        for k2, t2, s2, r2, o2 in _klv(buf, off, off + size * rep):
+            pay = buf[o2:o2 + s2 * r2]
+            if t2 in _TYPES:
+                v = _values(buf, t2, s2, r2, o2).ravel(); v = [int(x) if t2 in 'bBsSlLjJ' else float(x) for x in v]; v = v[0] if len(v) == 1 else v
+            elif t2 in ('c', 'F'):
+                v = pay.decode('latin1', 'replace').rstrip('\0')
+            else:
+                continue
+            if k2 == 'DVID' and t2 == 'F':
+                key = v
+            elif k2 == 'DVNM' and key is None:
+                key = v
+            block[k2] = v
+        if key is not None:
+            out[key] = block
+    return out
+
+
+def baseline(path):
+    """Lens 0 relative to lens 1, cm: the negative of the header's SHFX/Y/Z (mm), as docs/FORMAT.md defines B."""
+    g = read_calibration(path).get('GEOC')
+    if not g or any(k not in g for k in ('SHFX', 'SHFY', 'SHFZ')):
+        raise ValueError(f"{path}: no GEOC SHFX/Y/Z in the header")
+    return np.array([-g['SHFX'], -g['SHFY'], -g['SHFZ']]) / 10.
 
 
 # ---- Compressed payloads ('#') ----------------------------------------------

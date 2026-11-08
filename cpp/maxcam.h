@@ -1,9 +1,12 @@
 // Camera model and stitch-warp inversion for the GoPro Max.
 //
-// The default model is the clean equi-angular cube of docs/FORMAT.md, with no fitted values:
+// The model is the clean equi-angular cube of docs/FORMAT.md:
 //
-//   CameraModel  maps a "model pixel" to the viewing ray of its lens.  It holds a lattice of
-//                corrections over the cube; the file in calibration/ leaves them all at zero.
+//   CameraModel  maps a "model pixel" to the viewing ray of its lens.  By default it is the cube
+//                with a built-in baseline; a .360 file supplies the camera's own baseline, and a
+//                corrections file (calibration/README.md) can add a lattice of ray corrections, a
+//                baseline change and a rotation of lens 1.  With no corrections the cube is used
+//                in closed form both ways.
 //   StitchWarp   maps between model pixels and the frame as recorded, which the
 //                camera has warped per frame from its DISP metadata.
 //
@@ -65,9 +68,10 @@ class CameraModel {
 public:
     CameraModel();
 
-    // Reads a calibration file (calibration/README.md).  Returns false, with error()
-    // set, if the file is missing or malformed.
-    bool load(const std::string& path);
+    // Both arguments optional (""): a .360 file, whose header gives the camera's baseline, and a
+    // corrections file (calibration/README.md), added on top.  Returns false, with error() set, if
+    // a given file is missing or malformed; the model is then back at its defaults.
+    bool load(const std::string& clip_path, const std::string& corrections_path = "");
     const std::string& error() const { return error_; }
 
     // A recorded pixel's ray, normalized; and the recorded pixel of a ray on lens `lens` (0 or 1),
@@ -86,6 +90,10 @@ public:
 
     // Lens 0's centre relative to lens 1's, in centimetres.
     Vec3 baseline() const { return baseline_; }
+    // The corrections file's rotation of lens 1, degrees, as a rotation vector; zero by default.
+    Vec3 lens1_rotation() const { return rot1_deg_; }
+    // Whether any lattice correction is non-zero.  If not, rays use the cube in closed form.
+    bool has_lattice() const { return !lattice_zero_; }
 
     // The along-stitch to across-stitch ratio of the warp, from the baseline.
     double warp_ratio() const { return std::fabs(baseline_.x / baseline_.z); }
@@ -96,11 +104,17 @@ public:
 
 private:
     static const int LEVELS = 3;
-    std::vector<Vec3> data_;
+    std::vector<Vec3> base_;        // the cube's corners at level 0, zero elsewhere
+    std::vector<Vec3> data_;        // base_ plus the corrections file's lattice values
     std::vector<int> tiles_[2][LEVELS][5];      // indices into data_
-    Vec3 baseline_;
+    bool lattice_zero_ = true;
+    Vec3 baseline_, rot1_deg_;
+    double rot1_[9];                // lens 1's rotation matrix, identity by default
     std::string error_;
 
+    void reset();
+    void set_rotation(Vec3 deg);
+    Vec3 rotate1(Vec3 v, bool inverse) const;
     Vec3 spline(int side, int tile, double cx, double cy, Vec3* gx, Vec3* gy) const;
     Vec2 ray_to_pixel_on(Vec3 ray, int side) const;
 };

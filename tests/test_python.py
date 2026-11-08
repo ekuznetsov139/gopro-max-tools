@@ -165,6 +165,11 @@ if clip:
     o = Orientation(clip)
     R = o.camera_from_world(0)
     check('orientation is a rotation', np.allclose(R @ R.T, np.eye(3), atol=1e-6))
+    cal = gpmf.read_calibration(clip)
+    check('header calibration has GEOC, FRNT and BACK', all(k in cal for k in ('GEOC', 'FRNT', 'BACK')), sorted(cal))
+    check('FRNT has a 5-term lens polynomial', len(cal.get('FRNT', {}).get('KLNS', [])) == 5)
+    B = gpmf.baseline(clip)
+    check('baseline is a few cm, mostly along z', 2 < np.linalg.norm(B) < 8 and abs(B[2]) > abs(B[0]), B.round(4).tolist())
 
 print('FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed')
 sys.exit(1 if FAILS else 0)

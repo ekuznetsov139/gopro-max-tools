@@ -1,12 +1,13 @@
-# Camera model file
+# Corrections file
 
-`model4.txt` is the clean equi-angular cube for `cpp/maxcam.h`: the corners of the cube, and zero in every other lattice value, so it holds no fitted shape. Only its baseline is specific to a camera, so another unit should use its own, from its file's calibration ([docs/FORMAT.md](../docs/FORMAT.md#factory-calibration)).
+`model4.txt` holds corrections for `cpp/maxcam.h`'s `CameraModel`, added on top of the clean equi-angular cube of [docs/FORMAT.md](../docs/FORMAT.md). The file shipped here is all zero: no corrections, the model is the cube, and the baseline comes from the `.360` file's own header (or the built-in default). At present there is no evidence that any lattice correction improves the fit.
 
-It is a text file of 925 rows:
+It is a text file of 904 rows, three numbers each:
 
 | rows | content |
 |---|---|
-| 1..902 | lattice values `x y z`: 50 + 178 + 674 for levels 0, 1, 2. Corners of the cube at level 0, everything else zero |
-| 903..904 | lens axis rotations, quaternion `w x y z`; identity in every fitted file |
-| 905 | baseline `x y z`, cm: lens 0 relative to lens 1 |
-| 906..925 | left over from older models; not read |
+| 1..902 | lattice corrections `x y z`, added to the cube's rays: 50 + 178 + 674 values for levels 0, 1, 2 (2, 4 and 8 cells per tile) |
+| 903 | baseline correction `x y z`, cm, added to the header's (or default) baseline |
+| 904 | rotation of lens 1, degrees, as a rotation vector `x y z` |
+
+Load it with `model.load(clip_path, "calibration/model4.txt")`; either path may be empty.

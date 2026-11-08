@@ -57,7 +57,7 @@ All rays share one frame, with the rear lens's small rotation already removed by
 
 ## Factory calibration
 
-Every file carries the camera's own calibration, in `moov/udta/GPMF`:
+Every file carries the camera's own calibration, in `moov/udta/GPMF` (`max360.read_calibration` reads it; `max360.baseline` gives B in cm):
 
 | Block | Field | Meaning | Example |
 |---|---|---|---|
@@ -176,7 +176,7 @@ The fitted values here are 66.77, 88.4 and the three constants of `Z`. `Z` was m
 
 ## Corrections lattice
 
-`CameraModel` in `cpp/maxcam.h` can hold corrections on top of the cube: a lattice spline over the tile layout, in three levels with 2, 4 and 8 cells per tile, 902 3-D values in all. The tile fractions are first remapped so that level 0's bilinear part is exactly the cube. With the cube's corners at level 0 and zero elsewhere, as in `calibration/model4.txt`, the ray is the cube's.
+`CameraModel` in `cpp/maxcam.h` can hold corrections on top of the cube: a lattice spline over the tile layout, in three levels with 2, 4 and 8 cells per tile, 902 3-D values in all. The tile fractions are first remapped so that level 0's bilinear part is exactly the cube. The values are corrections added to the cube's rays; `calibration/model4.txt` has them all zero, so the ray is the cube's, and that file can also carry a baseline correction and a rotation of lens 1.
 
 At present there is no evidence that any lattice corrections improve the fit.
 
