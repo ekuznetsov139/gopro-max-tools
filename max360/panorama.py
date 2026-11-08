@@ -6,8 +6,8 @@ on depth.  That suits detection.  For measuring, use the camera model in cpp/.
 
 Tiles are equi-angular, u = (4 / pi) atan(t), not gnomonic.  A side tile keeps the centre tile's
 scale along their shared edge, and the mid-plane z = 0 between the lenses falls HW = 656.5 px from
-that edge, so a pair of tiles shares a 63 px band, blended linearly.  HW is a fit to the picture
-as stitched, not a property of the optics.
+that edge, so a pair of tiles shares a 63 px band, blended linearly.  docs/FORMAT.md has the layout
+as 656 + 32 px; this half-pixel difference hasn't been resolved.
 """
 import math
 

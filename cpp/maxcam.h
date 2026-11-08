@@ -1,20 +1,23 @@
 // Camera model and stitch-warp inversion for the GoPro Max.
 //
-// Two separate maps, both on the raw 4096x2688 frame (track 0 stacked over track 1):
+// The default model is the clean equi-angular cube of docs/FORMAT.md, with no fitted values:
 //
-//   CameraModel  maps a "model pixel" to the viewing ray of its lens.
+//   CameraModel  maps a "model pixel" to the viewing ray of its lens.  It holds a lattice of
+//                corrections over the cube; the file in calibration/ leaves them all at zero.
 //   StitchWarp   maps between model pixels and the frame as recorded, which the
 //                camera has warped per frame from its DISP metadata.
 //
-// So a pixel of a recorded frame becomes a ray by:
+// All on the raw 4096x2688 frame (track 0 stacked over track 1).  A pixel of a recorded frame
+// becomes a ray by:
 //
-//   Vec2 m = StitchWarp::recorded_to_model(recorded_px, disp);
-//   Vec3 ray = model.pixel_to_ray(m);
+//   Vec3 ray = model.recorded_to_ray(recorded_px, disp);
 //
 // and a ray is looked up in a recorded frame by:
 //
-//   Vec2 m = model.ray_to_pixel(ray, lens);
-//   Vec2 recorded_px = StitchWarp::model_to_recorded(m, disp);
+//   Vec2 recorded_px = model.ray_to_recorded(ray, lens, disp);
+//
+// A model pixel can lie past its tile's outer edge, in the next tile's pixel range but still on
+// its own lens, so the calls that take one also take the lens.
 //
 // See docs/FORMAT.md.  Coordinates: x right, y up, z forward; pixel centres at
 // integers.  Lens 0 faces +z, lens 1 faces -z.  Not affiliated with GoPro.
@@ -67,20 +70,29 @@ public:
     bool load(const std::string& path);
     const std::string& error() const { return error_; }
 
-    // The ray of a pixel, not normalized.  gx and gy, when given, receive its
-    // derivative with respect to the pixel's x and y.
-    Vec3 pixel_to_ray(Vec2 px, Vec3* gx = nullptr, Vec3* gy = nullptr) const;
+    // A recorded pixel's ray, normalized; and the recorded pixel of a ray on lens `lens` (0 or 1),
+    // with x < -10 if that lens has none.  `disp` is that frame's DISP_LEN disparities.
+    Vec3 recorded_to_ray(Vec2 recorded_px, const float* disp) const;
+    Vec2 ray_to_recorded(Vec3 ray, int lens, const float* disp) const;
 
-    // The pixel of a ray on lens `side` (0 or 1; -1 tries lens 0, then lens 1), by
+    // The ray of a model pixel, not normalized.  gx and gy, when given, receive its derivative
+    // with respect to the pixel's x and y.  Without `lens`, the pixel's own tile decides.
+    Vec3 pixel_to_ray(Vec2 px, Vec3* gx = nullptr, Vec3* gy = nullptr) const;
+    Vec3 pixel_to_ray(Vec2 px, int lens, Vec3* gx = nullptr, Vec3* gy = nullptr) const;
+
+    // The model pixel of a ray on lens `side` (0 or 1; -1 tries lens 0, then lens 1), by
     // Newton iteration.  A pixel with x < -10 means the ray has none on that lens.
     Vec2 ray_to_pixel(Vec3 ray, int side = -1) const;
 
-    // Lens 1's centre relative to lens 0's, in centimetres, as fitted.
+    // Lens 0's centre relative to lens 1's, in centimetres.
     Vec3 baseline() const { return baseline_; }
 
-    // The nominal mapping with no calibration: the tile layout alone.
-    static Vec2 box_ray_to_pixel(Vec3 ray, int side);
-    static Vec3 box_pixel_to_ray(Vec2 px);
+    // The along-stitch to across-stitch ratio of the warp, from the baseline.
+    double warp_ratio() const { return std::fabs(baseline_.x / baseline_.z); }
+
+    // The cube alone, with no corrections.
+    static Vec2 cube_ray_to_pixel(Vec3 ray, int side);
+    static Vec3 cube_pixel_to_ray(Vec2 px, int lens);
 
 private:
     static const int LEVELS = 3;
@@ -89,18 +101,18 @@ private:
     Vec3 baseline_;
     std::string error_;
 
-    Vec3 spline(int side, int tile, double fx, double fy, Vec3* gx, Vec3* gy) const;
+    Vec3 spline(int side, int tile, double cx, double cy, Vec3* gx, Vec3* gy) const;
     Vec2 ray_to_pixel_on(Vec3 ray, int side) const;
 };
 
 class StitchWarp {
 public:
-    // `disp` is that frame's DISP_LEN disparities.
-    static Vec2 recorded_to_model(Vec2 recorded_px, const float* disp);
+    // `disp` is that frame's DISP_LEN disparities; `rho` is CameraModel::warp_ratio().
+    static Vec2 recorded_to_model(Vec2 recorded_px, const float* disp, double rho);
     // Solved by iteration.  Near the stitch a model pixel may have no recorded source
     // (the camera discarded it); the result is then the closest attempt, not a solution,
     // so check it against recorded_to_model if that matters.
-    static Vec2 model_to_recorded(Vec2 model_px, const float* disp);
+    static Vec2 model_to_recorded(Vec2 model_px, int lens, const float* disp, double rho);
 };
 
 }  // namespace maxcam

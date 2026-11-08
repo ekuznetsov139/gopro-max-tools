@@ -1,13 +1,12 @@
-# Example calibration
+# Camera model file
 
-`model4.txt` was fitted to one GoPro Max. It is representative of the lens distortion, but another unit will differ.
+`model4.txt` is the clean equi-angular cube for `cpp/maxcam.h`: the corners of the cube, and zero in every other lattice value, so it holds no fitted shape. Only its baseline is specific to a camera, so another unit should use its own, from its file's calibration ([docs/FORMAT.md](../docs/FORMAT.md#factory-calibration)).
 
 It is a text file of 925 rows:
 
 | rows | content |
 |---|---|
-| 1..902 | lattice values `x y z`: 50 + 178 + 674 for levels 0, 1, 2 |
+| 1..902 | lattice values `x y z`: 50 + 178 + 674 for levels 0, 1, 2. Corners of the cube at level 0, everything else zero |
 | 903..904 | lens axis rotations, quaternion `w x y z`; identity in every fitted file |
-| 905 | baseline `x y z`, cm |
-| 906..921 | the warp constants: the first 3 rows' first column are `c1 c2 c3`, and the third column is the falloff table. `cpp/maxcam.cpp` has these built in and does not read them |
-| 922..925 | unused scale factors |
+| 905 | baseline `x y z`, cm: lens 0 relative to lens 1 |
+| 906..925 | left over from older models; not read |

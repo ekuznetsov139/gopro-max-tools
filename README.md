@@ -4,7 +4,7 @@ Tools for GoPro Max `.360` files: decoded frames, metadata including `DISP`, gra
 
 The file format is mostly undocumented, so [docs/FORMAT.md](docs/FORMAT.md) writes down what's been worked out. Not affiliated with GoPro.
 
-**Status:** tested on files from one camera (firmware `H19.03.02.00.00`). `calibration/model4.txt` is an example fitted to that camera: it's representative of the Max's lens distortion, but another unit will differ. See [Limits](docs/FORMAT.md#limits).
+**Status:** tested on files from one camera (firmware `H19.03.02.00.00`). The C++ camera model is the clean equi-angular cube plus the depth-driven warp, using no fitted shape; the baseline in `calibration/model4.txt` is that camera's. The Python package doesn't include the camera model yet. See [Limits](docs/FORMAT.md#limits).
 
 ## Python
 
@@ -33,7 +33,7 @@ with Reader(path) as reader:
         break
 ```
 
-The panorama shows the picture as the camera stitched it, which suits detection. Its outer strips aren't true rays, so use the C++ model for measuring.
+The panorama shows the picture as the camera stitched it, which suits detection. Its outer strips aren't true rays, so don't measure from it.
 
 ## C++
 
@@ -48,8 +48,8 @@ if (!model.load("calibration/model4.txt"))
     return 1;
 
 // disp: this frame's 640 DISP values as floats, from max360.read_disp
-Vec2 m = StitchWarp::recorded_to_model(Vec2(600, 700), disp);
-Vec3 ray = model.pixel_to_ray(m).normalized();
+Vec3 ray = model.recorded_to_ray(Vec2(600, 700), disp);
+Vec2 px = model.ray_to_recorded(ray, lens_index(Vec2(600, 700)), disp);
 ```
 
 ## Tests

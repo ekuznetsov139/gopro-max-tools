@@ -8,6 +8,11 @@ namespace maxcam {
 namespace {
 
 const int H = TILE_H, W = FRAME_W, Wz = SIDE_W;
+const double PI = 3.14159265358979323846;
+const double HW = 656.;     // px from a C edge to the plane between the lenses
+
+// z of a side tile's outer edge on the cube, 32 px past that plane.
+double cube_outer_z() { return std::tan((1 - Wz / HW) * PI / 4); }
 
 double clampd(double x, double lo, double hi) { return std::min(std::max(x, lo), hi); }
 
@@ -85,17 +90,19 @@ inline double edge_correction(double x, double y, bool outer_edge, Vec2* grad) {
 }
 
 // ---- The stitch warp, in "stripped" coordinates -----------------------------
-// All four quadrants of the outer tiles unrolled into one strip: x is the distance
-// from the stitch, y runs along the whole stitch (4 * 1344 long, wrapping).
-Vec2 to_stripped(Vec2 px) {
+// All four quadrants of a lens's outer tiles unrolled into one strip: x is the distance
+// from the stitch, y runs along the whole stitch (4 * 1344 long, wrapping).  x is signed: a
+// warped position can lie past the tile's outer edge, still on the same lens.
+Vec2 to_stripped(Vec2 px, int cam) {
+    double sign = cam ? 1 : -1;
     if (px.x >= 2048.) {
         if (px.y >= 1343.5)
-            return Vec2(std::fabs(px.x - 3407.5), 3 * 1344 + 2687.5 - px.y);
-        return Vec2(std::fabs(px.x - 3407.5), 0.5 + px.y);
+            return Vec2((px.x - 3407.5) * -sign, 3 * 1344 + 2687.5 - px.y);
+        return Vec2((px.x - 3407.5) * sign, 0.5 + px.y);
     }
     if (px.y >= 1343.5)
-        return Vec2(std::fabs(px.x - 687.5), 1344 + px.y - 1343.5);
-    return Vec2(std::fabs(px.x - 687.5), 2 * 1344 + 1343.5 - px.y);
+        return Vec2((px.x - 687.5) * sign, 1344 + px.y - 1343.5);
+    return Vec2((px.x - 687.5) * -sign, 2 * 1344 + 1343.5 - px.y);
 }
 
 Vec2 from_stripped(Vec2 s, int cam) {
@@ -108,54 +115,88 @@ Vec2 from_stripped(Vec2 s, int cam) {
     return Vec2(3407.5 + s.x * (cam ? -1 : 1), 2687.5 - (s.y - 2688 - 1344));
 }
 
-// Fitted constants.  x_zone is the warp's falloff with distance into the strip; the
-// three weights are the c1, c2, c3 of docs/FORMAT.md.
-const float DISP_SCALE_X = 69.12f, DISP_SCALE_Y = 59.875f;
-const float WARP_WIDTH = 344.f, MAX_DISP = 80.f;
-const double WEIGHT_X0 = 1.279495, WEIGHT_X1 = -0.188683, WEIGHT_Y = 1.002468;
-const double INTERP = 0.333;
-const float X_ZONE[17] = {
-    0.002021f, 0.021586f, 0.051468f, 0.099344f, 0.161015f, 0.233702f, 0.303061f, 0.378131f, 0.449792f,
-    0.526414f, 0.591500f, 0.665341f, 0.727919f, 0.792834f, 0.860367f, 0.924303f, 1.0f,
-};
+// The warp of docs/FORMAT.md.
+const double WARP_WIDTH = 344., WARP_NEUTRAL = 66.77, WARP_GAIN = 88.4, INTERP = 0.333;
+// Z(s), the warp's falloff with distance s from the stitch: a parabola reaching zero at Z_END,
+// continued below Z_KNEE by its tangent line.  About 1 at the stitch.
+const double Z_END = 332., Z_KNEE = 247., Z_CURV = 2.03e-5;
 
-inline double interpolate4(const double* p, double dx) {
-    double v1 = INTERP * p[1] + (1. - INTERP) * (p[0] * 0.5 + p[2] * 0.5);
-    double v2 = INTERP * p[2] + (1. - INTERP) * (p[1] * 0.5 + p[3] * 0.5);
-    return v1 * (1. - dx) + v2 * dx;
+double falloff(double s) {
+    if (s >= Z_END)
+        return 0;
+    if (s < 0)
+        s = 0;      // past the outer edge, the falloff stays at its edge value
+    if (s >= Z_KNEE)
+        return Z_CURV * (Z_END - s) * (Z_END - s);
+    return Z_CURV * (Z_END - Z_KNEE) * ((Z_END - Z_KNEE) + 2 * (Z_KNEE - s));
 }
 
-Vec2 warp_stripped(Vec2 s, const float* vdisp, int cam) {
-    float phase = (s.y / (4 * 1344)) * 640. + 80.;
-    if (phase >= 640.)
-        phase -= 640.;
-    float fx = 1. - s.x / WARP_WIDTH;
-    float compression = (1. - 1.30 * DISP_SCALE_X / 688.);
-    compression = (688. - s.x) * (1.0 - compression);
-    if (fx < 0.0)
-        return s + Vec2(compression, 0);
-    int ifx = std::min(15, int(fx * 16));
-    float delta_fx = fx * 16 - ifx;
-    fx = X_ZONE[ifx] * (1. - delta_fx) + X_ZONE[ifx + 1] * delta_fx;
+Vec2 warp_stripped(Vec2 s, const float* disp, int cam, double rho) {
+    if (s.x >= WARP_WIDTH)
+        return s;
+    double z = falloff(s.x);
 
-    int iphase = std::min(std::max(int(phase), 0), 639);
-    double ldisp[4];
-    for (int i = 0; i < 4; i++)
-        ldisp[i] = vdisp[(iphase - 1 + i + DISP_LEN) % DISP_LEN];
-    float disp = interpolate4(ldisp, phase - iphase);
+    double phi = s.y / (4 * 1344) * DISP_LEN + 80.;
+    if (phi >= DISP_LEN)
+        phi -= DISP_LEN;
+    int i = std::min(std::max(int(phi), 0), DISP_LEN - 1);
+    auto v = [&](int j) {
+        return INTERP * disp[(j + DISP_LEN) % DISP_LEN]
+            + (1. - INTERP) * (disp[(j - 1 + DISP_LEN) % DISP_LEN] + disp[(j + 1) % DISP_LEN]) / 2;
+    };
+    double d = v(i) * (1. - (phi - i)) + v(i + 1) * (phi - i);
+    double a = (WARP_NEUTRAL - d) / 80. * z;
+    double psi = 2 * PI * i / DISP_LEN;
 
-    double x_weight = WEIGHT_X0 + WEIGHT_X1 * std::cos((iphase / 160.) * 2 * 3.1415926);
-    float y_weight = WEIGHT_Y * std::cos((iphase / 320.) * 3.1415926);
-    disp = (1. - disp / MAX_DISP) * fx;
+    Vec2 out(s.x - WARP_GAIN * a / std::max(std::fabs(std::cos(psi)), std::fabs(std::sin(psi))),
+             s.y + (cam ? -1 : 1) * WARP_GAIN * rho * a * std::cos(psi));
+    if (out.y < 0)
+        out.y += 1344 * 4;
+    if (out.y >= 1344 * 4)
+        out.y -= 1344 * 4;
+    return out;
+}
 
-    float dx = -disp * DISP_SCALE_X * x_weight + compression;
-    float dy = disp * DISP_SCALE_Y * y_weight * (cam ? -1 : 1);
-    s = Vec2(s.x + dx, s.y + dy);
-    if (s.y < 0)
-        s.y += 1344 * 4;
-    if (s.y >= 1344 * 4)
-        s.y -= 1344 * 4;
-    return s;
+// Which tile a pixel falls in on a given lens.  A pixel across a stitch from its own lens's tile
+// stays on that lens: the tile's fractions then run outside 0..1.
+struct TilePos {
+    int plane, col, x0, w;
+    double fx, fy;
+};
+
+TilePos locate(Vec2 v, int lens) {
+    double x = v.x + 0.5, y = v.y + 0.5;
+    TilePos t;
+    t.plane = y >= H ? 1 : 0;
+    t.col = locate_column(x, t.x0, t.w);
+    if (t.col != 2 && TILE_BLOCKS[t.plane * 5 + t.col][0] != lens) {
+        static const int across[5] = {1, 0, 2, 4, 3};
+        t.col = across[t.col];
+        static const int left[5] = {0, Wz, 2 * Wz, W - 2 * Wz, W - Wz};
+        t.x0 = left[t.col];
+    }
+    t.fx = (x - t.x0) / t.w;
+    t.fy = (y - (t.plane ? H : 0)) / H;
+    return t;
+}
+
+// Tile fractions -> the fractions at which a bilinear patch between the cube's corners gives the
+// cube's ray, with their derivatives.
+void cube_fractions(const TilePos& t, double& gx, double& gy, double& dgx, double& dgy) {
+    double angle = (1 - 2 * t.fy) * PI / 4, tn = std::tan(angle);
+    gy = (1 - tn) / 2;
+    dgy = (PI / 4) * (1 + tn * tn);
+    if (t.col == 2) {
+        tn = std::tan((2 * t.fx - 1) * PI / 4);
+        gx = (1 + tn) / 2;
+        dgx = (PI / 4) * (1 + tn * tn);
+        return;
+    }
+    bool inner_left = t.col == 0 || t.col == 3;     // the C edge is on the tile's left
+    double n = Wz * (inner_left ? t.fx : 1 - t.fx);
+    double q = std::tan((1 - n / HW) * PI / 4), qe = cube_outer_z();
+    gx = inner_left ? (1 - q) / (1 - qe) : (q - qe) / (1 - qe);
+    dgx = (PI / (4 * HW)) * (1 + q * q) * Wz / (1 - qe);
 }
 
 }  // namespace
@@ -245,7 +286,10 @@ bool CameraModel::load(const std::string& path) {
     return ok;
 }
 
-Vec3 CameraModel::spline(int side, int tile, double fx, double fy, Vec3* pgx, Vec3* pgy) const {
+Vec3 CameraModel::spline(int side, int tile, double cx, double cy, Vec3* pgx, Vec3* pgy) const {
+    // (cx, cy) drive the bilinear part, which carries on along the cube face past the tile's edge;
+    // the bumps have no support there, so they stop at the edge.
+    double fx = clampd(cx, 0, 1), fy = clampd(cy, 0, 1);
     const std::vector<int>& t0 = tiles_[side][0][tile];
     auto at = [&](const std::vector<int>& t, int i) -> const Vec3& { return data_[t[i]]; };
 
@@ -253,12 +297,8 @@ Vec3 CameraModel::spline(int side, int tile, double fx, double fy, Vec3* pgx, Ve
     // midpoints and centre.
     const Vec3 &c0 = at(t0, 0), &c1 = at(t0, 2), &c2 = at(t0, 6), &c3 = at(t0, 8);
     const Vec3 &cx0 = at(t0, 3), &cx1 = at(t0, 5), &cy0 = at(t0, 1), &cy1 = at(t0, 7), &cc = at(t0, 4);
-    Vec3 def = (c0 * (1 - fx) + c1 * fx) * (1 - fy) + (c2 * (1 - fx) + c3 * fx) * fy;
+    Vec3 def = (c0 * (1 - cx) + c1 * cx) * (1 - cy) + (c2 * (1 - cx) + c3 * cx) * cy;
     Vec3 gx, gy;
-    if (pgx) {
-        gx = (c1 - c0) * (1 - fy) + (c3 - c2) * fy;
-        gy = (c2 - c0) * (1 - fx) + (c3 - c1) * fx;
-    }
     double w[4];
     edge_effects(fx, fy, w);
     double cfx = fx - 0.5, cfy = fy - 0.5;
@@ -318,79 +358,64 @@ Vec3 CameraModel::spline(int side, int tile, double fx, double fy, Vec3* pgx, Ve
         }
     }
     if (pgx) {
-        *pgx = gx;
-        *pgy = gy;
+        // A clamped coordinate no longer moves the bumps.
+        *pgx = (gx * (fx == cx ? 1.0 : 0.0)) + (c1 - c0) * (1 - cy) + (c3 - c2) * cy;
+        *pgy = (gy * (fy == cy ? 1.0 : 0.0)) + (c2 - c0) * (1 - cx) + (c3 - c1) * cx;
     }
     return def;
 }
 
 Vec3 CameraModel::pixel_to_ray(Vec2 v, Vec3* pgx, Vec3* pgy) const {
-    double x = v.x + 0.5, y = v.y + 0.5;
-    int plane = y >= H ? 1 : 0;
-    int x0, w;
-    int xz = locate_column(x, x0, w);
-    x = (x - x0) / w;
-    y = (y - (plane ? H : 0)) / H;
-    const int* block = TILE_BLOCKS[plane * 5 + xz];
-    Vec3 ray = spline(block[0], block[1], x, y, pgx, pgy);
+    return pixel_to_ray(v, lens_index(v), pgx, pgy);
+}
+
+Vec3 CameraModel::pixel_to_ray(Vec2 v, int lens, Vec3* pgx, Vec3* pgy) const {
+    TilePos t = locate(v, lens);
+    double gx, gy, dgx, dgy;
+    cube_fractions(t, gx, gy, dgx, dgy);
+    const int* block = TILE_BLOCKS[t.plane * 5 + t.col];
+    Vec3 ray = spline(block[0], block[1], gx, gy, pgx, pgy);
     if (pgx) {
-        *pgx = *pgx * (1. / w);
-        *pgy = *pgy * (1. / H);
+        *pgx = *pgx * (dgx / t.w);
+        *pgy = *pgy * (dgy / H);
     }
     return ray;
 }
 
-Vec2 CameraModel::box_ray_to_pixel(Vec3 ray, int side) {
+Vec2 CameraModel::cube_ray_to_pixel(Vec3 ray, int side) {
     if (side < 0)
         side = ray.z > 0 ? 0 : 1;
-    else if (side == 0)
-        ray.z = std::max(0.0, ray.z);
-    else
-        ray.z = std::min(0.0, ray.z);
     if (side == 1) {
         std::swap(ray.x, ray.y);
         ray.z *= -1;
     }
+    const double to_u = 4 / PI;
     if (ray.z > std::fabs(ray.x) && ray.z > std::fabs(ray.y)) {
-        ray.x /= ray.z;
-        ray.y /= ray.z;
-        return Vec2(2 * Wz + H * (ray.x + 1) / 2. - 0.5, (side ? H : 0) + H * (1 - ray.y) / 2. - 0.5);
+        double fx = (to_u * std::atan(ray.x / ray.z) + 1) / 2, fy = (1 - to_u * std::atan(ray.y / ray.z)) / 2;
+        return Vec2(2 * Wz + H * fx - 0.5, (side ? H : 0) + H * fy - 0.5);
     }
     if (std::fabs(ray.x) > std::fabs(ray.y)) {
-        double fy = clampd((1 - ray.y / std::fabs(ray.x)) / 2., 1e-8, 1 - 1e-8);
-        double fz = clampd(ray.z / std::fabs(ray.x), 1e-8, 1 - 1e-8);
-        Vec2 px(Wz + Wz * fz - 0.5, (side ? H : 0) + H * fy - 0.5);
-        if (ray.x > 0)
-            px.x = W - 1 - px.x;
-        return px;
+        double ax = std::fabs(ray.x), fy = (1 - to_u * std::atan(ray.y / ax)) / 2;
+        double n = HW * (1 - to_u * std::atan(ray.z / ax));
+        return Vec2(ray.x > 0 ? W - 2 * Wz + n - 0.5 : 2 * Wz - n - 0.5, (side ? H : 0) + H * fy - 0.5);
     }
-    double fx = clampd((1 - ray.x / std::fabs(ray.y)) / 2., 1e-8, 1 - 1e-8);
-    double fz = clampd(1. - ray.z / std::fabs(ray.y), 1e-8, 1 - 1e-8);
-    Vec2 px(Wz * fz - 0.5, (side ? 0 : H) + H * fx - 0.5);
-    if (ray.y > 0)
-        px.x = W - 1 - px.x;
-    return px;
+    double ay = std::fabs(ray.y), fy = (1 - to_u * std::atan(ray.x / ay)) / 2;
+    double n = HW * (1 - to_u * std::atan(ray.z / ay));
+    return Vec2(ray.y > 0 ? W - n - 0.5 : n - 0.5, (side ? 0 : H) + H * fy - 0.5);
 }
 
-Vec3 CameraModel::box_pixel_to_ray(Vec2 v) {
-    double x = v.x + 0.5, y = v.y + 0.5;
-    int plane = y >= H ? 1 : 0;
-    int x0, w;
-    int xz = locate_column(x, x0, w);
-    x = (x - x0) / w;
-    y = (y - (plane ? H : 0)) / H;
+Vec3 CameraModel::cube_pixel_to_ray(Vec2 v, int lens) {
+    TilePos t = locate(v, lens);
+    double b = std::tan((1 - 2 * t.fy) * PI / 4);
     Vec3 ray;
-    if (xz == 2)
-        ray = Vec3(-1 + x * 2, 1 - y * 2, 1);
-    else if (xz == 1)
-        ray = Vec3(-1, 1 - y * 2, x);
-    else if (xz == 3)
-        ray = Vec3(1, 1 - y * 2, 1 - x);
-    else if (xz == 0)
-        ray = Vec3(-1, 1 - y * 2, -1 + x);
-    else
-        ray = Vec3(1, 1 - y * 2, -x);
-    if (plane) {
+    if (t.col == 2) {
+        ray = Vec3(std::tan((2 * t.fx - 1) * PI / 4), b, 1);
+    } else {
+        double n = Wz * ((t.col == 0 || t.col == 3) ? t.fx : 1 - t.fx);
+        double q = std::tan((1 - n / HW) * PI / 4);
+        ray = Vec3(t.col < 2 ? -1 : 1, b, (t.col == 1 || t.col == 3) ? q : -q);
+    }
+    if (t.plane) {
         std::swap(ray.x, ray.y);
         ray.z *= -1;
     }
@@ -409,12 +434,10 @@ Vec2 CameraModel::ray_to_pixel_on(Vec3 ray, int side) const {
     ray = ray.normalized();
     if ((side == 0 && ray.z < -0.20) || (side == 1 && ray.z > 0.20))
         return Vec2(-1e6, -1e6);
-    Vec3 intl = ray;
-    intl.z = side == 0 ? std::max(intl.z, 0.0) : std::min(intl.z, 0.0);
-    Vec2 px = box_ray_to_pixel(intl, side);
+    Vec2 px = cube_ray_to_pixel(ray, side);
     for (int pass = 0; pass <= 100; pass++) {
         Vec3 gx, gy;
-        Vec3 def = pixel_to_ray(px, &gx, &gy);
+        Vec3 def = pixel_to_ray(px, side, &gx, &gy);
         double len = def.norm();
         gx = gx * (1. / len);
         gy = gy * (1. / len);
@@ -429,12 +452,10 @@ Vec2 CameraModel::ray_to_pixel_on(Vec3 ray, int side) const {
         double det = xx * yy - xy * xy;
         Vec2 step((rhs.x * yy - rhs.y * xy) / det, -(rhs.x * xy - rhs.y * xx) / det);
         Vec2 next = px + step;
-        if (next.x < -0.5 || next.y < -0.5 || next.x > 4095.5 || next.y > 2687.5 || zone_index(px) != zone_index(next)) {
-            // Newton would leave this tile, where the model has a kink: step on the box instead.
-            intl = box_pixel_to_ray(px) + err;
-            intl.z = side == 0 ? std::max(intl.z, 0.0) : std::min(intl.z, 0.0);
-            intl = intl.normalized();
-            px = box_ray_to_pixel(intl, side);
+        TilePos a = locate(px, side), b = locate(next, side);
+        if (next.x < -0.5 || next.y < -0.5 || next.x > 4095.5 || next.y > 2687.5 || a.plane != b.plane || a.col != b.col) {
+            // Newton would leave this tile, where the model has a kink: step on the cube instead.
+            px = cube_ray_to_pixel((cube_pixel_to_ray(px, side).normalized() + err).normalized(), side);
         } else {
             px = next;
         }
@@ -442,68 +463,48 @@ Vec2 CameraModel::ray_to_pixel_on(Vec3 ray, int side) const {
     return Vec2(-1e5, -1e5);
 }
 
-// ---- StitchWarp -------------------------------------------------------------
-Vec2 StitchWarp::recorded_to_model(Vec2 px, const float* disp) {
-    if (px.x >= 688 * 2 && px.x < 3408 - 688)
-        return px;
-    int cam = lens_index(px);
-    return from_stripped(warp_stripped(to_stripped(px), disp, cam), cam);
+Vec3 CameraModel::recorded_to_ray(Vec2 px, const float* disp) const {
+    return pixel_to_ray(StitchWarp::recorded_to_model(px, disp, warp_ratio()), lens_index(px)).normalized();
 }
 
-Vec2 StitchWarp::model_to_recorded(Vec2 px, const float* disp) {
-    if (px.x >= 688 * 2 - 0.5 && px.x < 3408 - 688 - 0.5)
-        return px;
+Vec2 CameraModel::ray_to_recorded(Vec3 ray, int lens, const float* disp) const {
+    Vec2 m = ray_to_pixel(ray, lens);
+    return m.x < -10 ? m : StitchWarp::model_to_recorded(m, lens, disp, warp_ratio());
+}
+
+// ---- StitchWarp -------------------------------------------------------------
+Vec2 StitchWarp::recorded_to_model(Vec2 px, const float* disp, double rho) {
     int cam = lens_index(px);
-    Vec2 target = to_stripped(px);
-    Vec2 guess = target, last_error, last_move, last_guess = guess;
-    int unroll = 0;
-    for (int pass = 0; pass <= 100; pass++) {
-        Vec2 error = target - warp_stripped(guess, disp, cam);
-        if (last_error.norm2() != 0 && error.norm2() > last_error.norm2()) {
-            guess = last_guess;
-            unroll++;
-            continue;
-        } else if (error.norm2() < last_error.norm2()) {
-            unroll = 0;
-        }
-        if (error.norm2() < 1e-8)
+    if (locate(px, cam).col == 2)
+        return px;
+    return from_stripped(warp_stripped(to_stripped(px, cam), disp, cam, rho), cam);
+}
+
+Vec2 StitchWarp::model_to_recorded(Vec2 px, int lens, const float* disp, double rho) {
+    if (locate(px, lens).col == 2)
+        return px;
+    Vec2 target = to_stripped(px, lens), guess = target;
+    double gain = 1, last = 1e30;
+    for (int pass = 0; pass < 200; pass++) {
+        Vec2 error = target - warp_stripped(guess, disp, lens, rho);
+        if (error.y > 2 * 1344)
+            error.y -= 4 * 1344;
+        else if (error.y < -2 * 1344)
+            error.y += 4 * 1344;
+        if (error.norm2() < 1e-16)
             break;
-        Vec2 move = error;
-        if (pass > 0 && last_error.norm2() < 1000 && error.norm2() < 1000) {
-            double x_scale = 0.0, y_scale = 0.0;
-            if (std::fabs(last_move.x) > 1e-6)
-                x_scale = (error.x - last_error.x) / (-last_move.x);
-            if (std::fabs(last_move.y) > 1e-6)
-                y_scale = (error.y - last_error.y) / (-last_move.y);
-            if (std::fabs(x_scale - y_scale) < 0.2) {
-                Vec2 r1 = last_move, r2 = error - last_error;
-                double n1 = std::sqrt(r1.norm2()), n2 = std::sqrt(r2.norm2());
-                // Either can be zero, where the warp is locally flat: no rotation to correct.
-                if (n1 > 0 && n2 > 0) {
-                    r1 = Vec2(r1.x / n1, r1.y / n1);
-                    r2 = Vec2(r2.x / n2, r2.y / n2);
-                    double phi = clampd(r2.x * r1.y - r2.y * r1.x, -0.25, 0.25);
-                    double cp = std::sqrt(1. - phi * phi);
-                    move = Vec2(move.x * cp - move.y * phi, move.x * phi + move.y * cp);
-                }
-            }
-            x_scale = clampd(x_scale, 0.5, 6.0);
-            y_scale = clampd(y_scale, 0.5, 6.0);
-            move.x /= x_scale * (unroll ? 2 : 1);
-            move.y /= y_scale * (unroll ? 2 : 1);
-        }
-        last_guess = guess;
-        guess = guess + move;
-        last_move = move;
-        last_error = error;
+        if (error.norm2() > last)
+            gain = std::max(gain / 2, 0.05);    // steep DISP steps can make the plain iteration overshoot
+        last = error.norm2();
+        guess = guess + Vec2(error.x * gain, error.y * gain);
         if (guess.y < 0)
             guess.y += 1344 * 4;
         else if (guess.y >= 1344 * 4)
             guess.y -= 1344 * 4;
         if (guess.x < 0)
-            guess.x = 0;
+            guess.x = 0;    // recorded pixels stop at the tile's edge
     }
-    return from_stripped(guess, cam);
+    return from_stripped(guess, lens);
 }
 
 }  // namespace maxcam
